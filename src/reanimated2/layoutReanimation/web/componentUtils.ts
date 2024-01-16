@@ -17,20 +17,15 @@ import { _updatePropsJS } from '../../js-reanimated';
 import type { ReanimatedHTMLElement } from '../../js-reanimated';
 import { ReduceMotion } from '../../commonTypes';
 import type { StyleProps } from '../../commonTypes';
-import { useReducedMotion } from '../../hook/useReducedMotion';
+import { isReducedMotion } from '../../PlatformChecker';
 import { LayoutAnimationType } from '../animationBuilder/commonTypes';
-
-const snapshots = new WeakMap();
+import { setDummyPosition, snapshots } from './componentStyle';
 
 function getEasingFromConfig(config: CustomConfig): string {
-  const easingName = (
-    config.easingV !== undefined &&
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    config.easingV!.name in WebEasings
-      ? // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-        config.easingV!.name
-      : 'linear'
-  ) as WebEasingsNames;
+  const easingName =
+    config.easingV && config.easingV.name in WebEasings
+      ? (config.easingV.name as WebEasingsNames)
+      : 'linear';
 
   return `cubic-bezier(${WebEasings[easingName].toString()})`;
 }
@@ -50,14 +45,12 @@ function getDelayFromConfig(config: CustomConfig): number {
 
   return shouldRandomizeDelay
     ? getRandomDelay(config.delayV)
-    : // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      config.delayV! / 1000;
+    : config.delayV / 1000;
 }
 
 export function getReducedMotionFromConfig(config: CustomConfig) {
   if (!config.reduceMotionV) {
-    // eslint-disable-next-line react-hooks/rules-of-hooks
-    return useReducedMotion();
+    return isReducedMotion();
   }
 
   switch (config.reduceMotionV) {
@@ -66,8 +59,7 @@ export function getReducedMotionFromConfig(config: CustomConfig) {
     case ReduceMotion.Always:
       return true;
     default:
-      // eslint-disable-next-line react-hooks/rules-of-hooks
-      return useReducedMotion();
+      return isReducedMotion();
   }
 }
 
@@ -81,14 +73,12 @@ function getDurationFromConfig(
     : Animations[animationName].duration;
 
   return config.durationV !== undefined
-    ? // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-      config.durationV! / 1000
+    ? config.durationV / 1000
     : defaultDuration;
 }
 
 function getCallbackFromConfig(config: CustomConfig): AnimationCallback {
-  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-  return config.callbackV !== undefined ? config.callbackV! : null;
+  return config.callbackV !== undefined ? config.callbackV : null;
 }
 
 function getReversedFromConfig(config: CustomConfig) {
@@ -141,22 +131,6 @@ export function saveSnapshot(element: HTMLElement) {
   snapshots.set(element, element.getBoundingClientRect());
 }
 
-export function makeElementVisible(element: HTMLElement, delay: number) {
-  if (delay === 0) {
-    _updatePropsJS(
-      { visibility: 'initial' },
-      { _component: element as ReanimatedHTMLElement }
-    );
-  } else {
-    setTimeout(() => {
-      _updatePropsJS(
-        { visibility: 'initial' },
-        { _component: element as ReanimatedHTMLElement }
-      );
-    }, delay * 1000);
-  }
-}
-
 export function setElementAnimation(
   element: HTMLElement,
   animationConfig: AnimationConfig,
@@ -192,7 +166,9 @@ export function setElementAnimation(
     element.style.transform = convertTransformToString(existingTransform);
   };
 
-  scheduleAnimationCleanup(animationName, duration + delay);
+  if (!(animationName in Animations)) {
+    scheduleAnimationCleanup(animationName, duration + delay);
+  }
 }
 
 export function handleLayoutTransition(
@@ -243,7 +219,8 @@ export function handleExitingAnimation(
   animationConfig: AnimationConfig
 ) {
   const parent = element.offsetParent;
-  const dummy = element.cloneNode() as HTMLElement;
+  const dummy = element.cloneNode() as ReanimatedHTMLElement;
+  dummy.reanimatedDummy = true;
 
   element.style.animationName = '';
   // We hide current element so only its copy with proper animation will be displayed
@@ -261,30 +238,16 @@ export function handleExitingAnimation(
   setElementAnimation(dummy, animationConfig);
   parent?.appendChild(dummy);
 
-  const snapshot = snapshots.get(element);
+  const snapshot = snapshots.get(element)!;
+  snapshots.set(dummy, snapshot);
 
-  dummy.style.transform = '';
-  dummy.style.position = 'absolute';
-  dummy.style.top = `${snapshot.top}px`;
-  dummy.style.left = `${snapshot.left}px`;
-  dummy.style.width = `${snapshot.width}px`;
-  dummy.style.height = `${snapshot.height}px`;
-  dummy.style.margin = '0px'; // tmpElement has absolute position, so margin is not necessary
-
-  const newRect = dummy.getBoundingClientRect();
-
-  // getBoundingClientRect returns DOMRect with position of the element with respect to document body.
-  // If react-navigation is used, `dummy` will be placed with wrong `top` position because of the header height.
-  // The trick below allows us to once again get position relative to body, and then calculate header height.
-  if (newRect.top !== snapshot.top) {
-    const headerHeight = Math.abs(newRect.top - snapshot.top);
-    dummy.style.top = `${snapshot.top - headerHeight}px`;
-  }
+  setDummyPosition(dummy, snapshot);
 
   const originalOnAnimationEnd = dummy.onanimationend;
 
   dummy.onanimationend = function (event: AnimationEvent) {
     if (parent?.contains(dummy)) {
+      dummy.removedAfterAnimation = true;
       parent.removeChild(dummy);
     }
 
@@ -294,6 +257,7 @@ export function handleExitingAnimation(
 
   dummy.addEventListener('animationcancel', () => {
     if (parent?.contains(dummy)) {
+      dummy.removedAfterAnimation = true;
       parent.removeChild(dummy);
     }
   });
